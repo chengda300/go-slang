@@ -1,5 +1,2 @@
-# go-slang
-Implementation of Go
-
-# Virtual Machine
-The virtual machine is used to run programs written in Go. It is written by Teow Hua Jun and Lim An Jun and the source code can be found [here](https://github.com/huajun07/go-virtual-machine).
+!function(t,a){"use strict";const e=eval;class s extends a.BasicEvaluator{someEvaluatorState;async evaluateChunk(t){this.someEvaluatorState++,e(t),this.conductor.sendOutput(`Chunk ${this.someEvaluatorState} evaluated!`)}constructor(t){super(t),this.someEvaluatorState=0}}const{runnerPlugin:u,conduit:n}=t.initialise(s)}(_,runner);
+//# sourceMappingURL=index.js.map
