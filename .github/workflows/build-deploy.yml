@@ -26,8 +26,8 @@ jobs:
       - name: yarn install
         run: yarn install --immutable
 
-      - name: yarn conductor
-        run: yarn conductor
+      #- name: yarn conductor
+      #  run: yarn conductor
 
       - name: Upload artifacts
         id: deployment
