@@ -1,4 +1,3 @@
-import { env } from 'process'
 import { Compiler } from '../../executor'
 import {
   CallInstruction,
@@ -6,13 +5,19 @@ import {
   LoadVariableInstruction,
   StoreInstruction,
 } from '../../executor/instructions'
-import { ArrayType, DeclaredType, NoType, ReturnType, StructType, Type } from '../../executor/typing'
+import { Type } from '../../executor/typing'
+import { ArrayType } from '../../executor/typing/array_type'
+import { DeclaredType } from '../../executor/typing/declared_type'
+import { NoType } from '../../executor/typing/no_type'
+import { PointerType } from '../../executor/typing/pointer_type'
+import { ReturnType } from '../../executor/typing/return_type'
+import { StructType } from '../../executor/typing/struct_type'
 
 import { Token, TokenLocation } from './base'
-import { ExpressionToken, PrimaryExpressionModifierToken, PrimaryExpressionToken } from './expressions'
+import { ExpressionToken, PrimaryExpressionToken } from './expressions'
 import { IdentifierToken } from './identifier'
-import { FunctionLiteralToken } from './literals'
-import { DeclaredTypeToken, PrimitiveTypeToken, StructTypeToken, TypeToken } from './type'
+import { ArrayLiteralToken, FunctionLiteralToken } from './literals'
+import { StructTypeToken, TypeToken } from './type'
 
 export type TopLevelDeclarationToken =
   | DeclarationToken
@@ -48,7 +53,7 @@ export class FunctionDeclarationToken extends Token {
   }
 }
 
-export abstract class DeclarationToken extends Token { }
+export abstract class DeclarationToken extends Token {}
 
 export class TypeDeclarationToken extends DeclarationToken {
   constructor(
@@ -69,7 +74,10 @@ export class TypeDeclarationToken extends DeclarationToken {
         'Either type(s) or name assignment(s) must be defined in type declaration.',
       )
     }
-    compiler.context.env.declare_type(identifier.identifier, varType.compile(compiler))
+    compiler.context.env.declare_type(
+      identifier.identifier,
+      varType.compile(compiler),
+    )
     const expectedType = varType ? varType.compile(compiler) : undefined
     compiler.type_environment.addType(
       identifier.identifier,
@@ -110,6 +118,7 @@ export class ShortVariableDeclarationToken extends DeclarationToken {
     // Compile and add identifiers to type environment.
     if (expressions) {
       /*
+      // TODO: Modify to recognise multiple return values from function calls
       if (identifiers.length !== expressions.length) {
         throw Error(
           `Assignment mismatch: ${identifiers.length} variable(s) but ${expressions.length} value(s).`,
@@ -118,82 +127,98 @@ export class ShortVariableDeclarationToken extends DeclarationToken {
         */
       let delta = 0
       for (let i = 0; i < expressions.length; i++) {
-        let start = compiler.instructions.length
+        const start = compiler.instructions.length
         const expressionTypes = expressions[i].compile(compiler)
-        let identifier = identifiers[i + delta].identifier
+        const identifier = identifiers[i + delta].identifier
         if (expressionTypes instanceof ReturnType) {
-          for (let j = 0; j < expressionTypes.types.length; j++) {
-            identifier = identifiers[i + j].identifier
-            const [frame_idx, var_idx] = compiler.context.env.find_var(identifier)
-            if (expectedType && !expectedType.assignableBy(expressionTypes.types[j])) {
-              throw Error(
-                `Cannot use ${expressionTypes.types[j]} as ${expectedType} in variable declaration`,
-              )
-            }
-            compiler.type_environment.addType(identifier, expressionTypes.types[j])
-            this.pushInstruction(
-              compiler,
-              new LoadVariableInstruction(frame_idx, var_idx, identifier),
-            )
-            this.pushInstruction(compiler, new StoreInstruction())
-          }
-          delta += expressionTypes.types.length - 1
-
-          // as the return values are loaded onto OS and thus popped in reverse order,
-          // storing them into variables should be in reverse order
-          // it is impossible to change how return values are loaded onto OS
-          // as it will conflict with other instructions such as binops.
-          let reverse_instructions = []
-          for (let j = 0; j < expressionTypes.types.length; j++) {
-            compiler.instructions.pop() // store instruction gets popped
-            let instructionSet = []
-            let a = 0
-            let next = compiler.instructions.pop()
-            while (!(next instanceof StoreInstruction || next instanceof CallInstruction)) {
-              instructionSet[a] = next // load and intermediate instructions get popped
-              a++
-              next = compiler.instructions.pop()
-            }
-            compiler.instructions.push(next)
-            reverse_instructions[j] = instructionSet
-          }
-          for (let j = 0; j < expressionTypes.types.length; j++) {
-            for (let k = reverse_instructions[j].length - 1; k >= 0; k--) {
-              this.pushInstruction(compiler, reverse_instructions[j][k] as Instruction)
-            }
-            this.pushInstruction(compiler, new StoreInstruction())
-          }
-        }
-        else {
+          delta += handleReturnType(
+            compiler,
+            expressionTypes,
+            identifiers,
+            i,
+            expectedType,
+          )
+        } else {
           const [frame_idx, var_idx] = compiler.context.env.find_var(identifier)
-          if (expressionTypes instanceof ArrayType) {
+          if (
+            expressionTypes instanceof ArrayType ||
+            expressionTypes instanceof StructType ||
+            (expressionTypes instanceof DeclaredType &&
+              expressionTypes.type[0] instanceof StructType) ||
+            (expressionTypes instanceof PointerType &&
+              expressionTypes.type instanceof DeclaredType &&
+              expressionTypes.type.type[0] instanceof StructType) ||
+            (expressionTypes instanceof PointerType &&
+              expressionTypes.type instanceof ArrayType)
+          ) {
+            // Since we are loading the "LoadVariableInstruction" while compiling arrays, structs
+            // and pointers, at that time, we have no access to the identifier ("variable name"),
+            // frame_idx and var_idx, so we have to modify those instructions to include the
+            // variable name, frame_idx and var_idx
             for (let j = start; j < compiler.instructions.length; j++) {
-              if (compiler.instructions[j] instanceof LoadVariableInstruction
-                && (compiler.instructions[j] as LoadVariableInstruction).id === ""
+              if (
+                compiler.instructions[j] instanceof LoadVariableInstruction &&
+                (compiler.instructions[j] as LoadVariableInstruction).id === ''
               ) {
-                compiler.instructions[j] = new LoadVariableInstruction(frame_idx, var_idx, identifier)
+                compiler.instructions[j] = new LoadVariableInstruction(
+                  frame_idx,
+                  var_idx,
+                  identifier,
+                )
               }
             }
           }
-          if (expectedType && !expectedType.assignableBy(expressionTypes)) {
+          if (
+            expectedType &&
+            !expectedType.assignableBy(expressionTypes as Type)
+          ) {
             throw Error(
               `Cannot use ${expressionTypes} as ${expectedType} in variable declaration`,
             )
           }
-          compiler.type_environment.addType(identifier, expressionTypes)
-          if (!(expressionTypes instanceof ArrayType)) {
+          compiler.type_environment.addType(identifier, expressionTypes as Type)
+          if (
+            (expressionTypes instanceof ArrayType &&
+              expressions[0] instanceof PrimaryExpressionToken &&
+              expressions[0].operand instanceof ArrayLiteralToken) ||
+            expressionTypes instanceof StructType ||
+            (expressionTypes instanceof DeclaredType &&
+              expressionTypes.type[0] instanceof StructType)
+          ) {
+            // instruction correction for array literals and structs to load and store it
+            // again, just to decouple the instructions from nested structs/multi-dimensional arrays
             this.pushInstruction(
               compiler,
               new LoadVariableInstruction(frame_idx, var_idx, identifier),
             )
-            this.pushInstruction(compiler, new StoreInstruction())
+          } else if (
+            expressionTypes instanceof PointerType &&
+            (expressionTypes.type instanceof ArrayType ||
+              (expressionTypes.type instanceof DeclaredType &&
+                expressionTypes.type.type[0] instanceof StructType))
+          ) {
+            // instruction correction for pointers of arrays and structs, since pointers
+            // come with a unary instruction, we move LoadVariableInstruction to be before
+            // the UnaryInstruction that retrieves the pointer
+            compiler.instructions[compiler.instructions.length - 2] =
+              new LoadVariableInstruction(frame_idx, var_idx, identifier)
+            compiler.instructions.pop()
           }
+          this.pushInstruction(
+            compiler,
+            new LoadVariableInstruction(frame_idx, var_idx, identifier),
+          )
+          this.pushInstruction(compiler, new StoreInstruction())
         }
       }
       if (expressions instanceof StructTypeToken) {
+        // register the whole struct as a type on its own
         const expressionTypes = expressions.compile(compiler)
         for (let i = 0; i < identifiers.length; i++) {
-          compiler.type_environment.addType(identifiers[i].identifier, expressionTypes)
+          compiler.type_environment.addType(
+            identifiers[i].identifier,
+            expressionTypes,
+          )
         }
       }
     } else {
@@ -240,6 +265,7 @@ export class VariableDeclarationToken extends DeclarationToken {
     // Compile and add identifiers to type environment.
     if (expressions) {
       /*
+      // TODO: Modify to recognise multiple return values from function calls
       if (identifiers.length !== expressions.length) {
         throw Error(
           `Assignment mismatch: ${identifiers.length} variable(s) but ${expressions.length} value(s).`,
@@ -248,62 +274,34 @@ export class VariableDeclarationToken extends DeclarationToken {
         */
       let delta = 0
       for (let i = 0; i < expressions.length; i++) {
-        let start = compiler.instructions.length
-        // if literal, use declared type instead of inferred primitive
+        const start = compiler.instructions.length
         let expressionTypes = expressions[i].compile(compiler)
-        let identifier = identifiers[i + delta].identifier
+        const identifier = identifiers[i + delta].identifier
         if (expressionTypes instanceof ReturnType) {
-          for (let j = 0; j < expressionTypes.types.length; j++) {
-            identifier = identifiers[i + j].identifier
-            const [frame_idx, var_idx] = compiler.context.env.find_var(identifier)
-            if (expectedType && !expectedType.assignableBy(expressionTypes.types[j])) {
-              throw Error(
-                `Cannot use ${expressionTypes.types[j]} as ${expectedType} in variable declaration`,
-              )
-            }
-            compiler.type_environment.addType(identifier, expressionTypes.types[j])
-            this.pushInstruction(
-              compiler,
-              new LoadVariableInstruction(frame_idx, var_idx, identifier),
-            )
-            this.pushInstruction(compiler, new StoreInstruction())
-          }
-          
-          delta += expressionTypes.types.length - 1
-
-          // as the return values are loaded onto OS and thus popped in reverse order,
-          // storing them into variables should be in reverse order
-          // it is impossible to change how return values are loaded onto OS
-          // as it will conflict with other instructions such as binops.
-          let reverse_instructions = []
-          for (let j = 0; j < expressionTypes.types.length; j++) {
-            compiler.instructions.pop() // store instruction gets popped
-            let instructionSet = []
-            let a = 0
-            let next = compiler.instructions.pop()
-            while (!(next instanceof StoreInstruction || next instanceof CallInstruction)) {
-              instructionSet[a] = next // load and intermediate instructions get popped
-              a++
-              next = compiler.instructions.pop()
-            }
-            compiler.instructions.push(next)
-            reverse_instructions[j] = instructionSet
-          }
-          for (let j = 0; j < expressionTypes.types.length; j++) {
-            for (let k = reverse_instructions[j].length - 1; k >= 0; k--) {
-              this.pushInstruction(compiler, reverse_instructions[j][k] as Instruction)
-            }
-            this.pushInstruction(compiler, new StoreInstruction())
-          }
-        }
-        else {
+          delta += handleReturnType(
+            compiler,
+            expressionTypes,
+            identifiers,
+            i,
+            expectedType,
+          )
+        } else {
           const [frame_idx, var_idx] = compiler.context.env.find_var(identifier)
-          if (expressionTypes instanceof ArrayType) {
+          if (
+            expressionTypes instanceof ArrayType ||
+            (expressionTypes instanceof DeclaredType &&
+              expressionTypes.type[0] instanceof StructType)
+          ) {
             for (let j = start; j < compiler.instructions.length; j++) {
-              if (compiler.instructions[j] instanceof LoadVariableInstruction
-                && (compiler.instructions[j] as LoadVariableInstruction).id === ""
+              if (
+                compiler.instructions[j] instanceof LoadVariableInstruction &&
+                (compiler.instructions[j] as LoadVariableInstruction).id === ''
               ) {
-                compiler.instructions[j] = new LoadVariableInstruction(frame_idx, var_idx, identifier)
+                compiler.instructions[j] = new LoadVariableInstruction(
+                  frame_idx,
+                  var_idx,
+                  identifier,
+                )
               }
             }
           }
@@ -316,21 +314,36 @@ export class VariableDeclarationToken extends DeclarationToken {
               actualType = nextType.name
               nextType = compiler.context.env.find_type(actualType)[0]
             }
-            if (expressions[i] instanceof PrimaryExpressionToken
-              && (expressions[i] as PrimaryExpressionToken).operand.type === "literal") {
-              if (nextType.assignableBy(expressionTypes)) {
+            if (
+              expressions[i] instanceof PrimaryExpressionToken &&
+              (expressions[i] as PrimaryExpressionToken).operand.type ===
+                'literal'
+            ) {
+              if (nextType.assignableBy(expressionTypes as Type)) {
                 expressionTypes = expectedType as Type
               }
+            } else if (nextType instanceof PointerType) {
+              expectedType = nextType
             }
           }
 
-          if (expectedType && !expectedType.assignableBy(expressionTypes)) {
+          if (
+            expectedType &&
+            !expectedType.assignableBy(expressionTypes as Type)
+          ) {
             throw Error(
               `Cannot use ${expressionTypes} as ${expectedType} in variable declaration`,
             )
           }
-          compiler.type_environment.addType(identifier, expressionTypes)
-          if (!(expressionTypes instanceof ArrayType)) {
+          compiler.type_environment.addType(identifier, expressionTypes as Type)
+          if (
+            !(expressionTypes instanceof ArrayType) &&
+            !(
+              expressionTypes instanceof DeclaredType &&
+              expressionTypes.type[0] instanceof StructType
+            )
+          ) {
+            // instruction correction for arrays and structs
             this.pushInstruction(
               compiler,
               new LoadVariableInstruction(frame_idx, var_idx, identifier),
@@ -390,4 +403,57 @@ export class ConstantDeclarationToken extends DeclarationToken {
     }
     return new NoType()
   }
+}
+
+// Handles the case where the expressionTypes are from return values
+// It is abstracted to reduce duplicate code
+function handleReturnType(
+  compiler: Compiler,
+  expressionTypes: ReturnType,
+  identifiers: IdentifierToken[],
+  i: number,
+  expectedType: Type | undefined,
+): number {
+  for (let j = 0; j < expressionTypes.types.length; j++) {
+    const identifier = identifiers[i + j].identifier
+    const [frame_idx, var_idx] = compiler.context.env.find_var(identifier)
+    if (expectedType && !expectedType.assignableBy(expressionTypes.types[j])) {
+      throw Error(
+        `Cannot use ${expressionTypes.types[j]} as ${expectedType} in variable declaration`,
+      )
+    }
+    compiler.type_environment.addType(identifier, expressionTypes.types[j])
+    compiler.instructions.push(
+      new LoadVariableInstruction(frame_idx, var_idx, identifier),
+    )
+    compiler.instructions.push(new StoreInstruction())
+  }
+
+  // as the return values are loaded onto OS and thus popped in reverse order,
+  // storing them into variables should be in reverse order
+  // it is impossible to change how return values are loaded onto OS
+  // as it will conflict with other instructions such as binops.
+  const reverse_instructions = []
+  for (let j = 0; j < expressionTypes.types.length; j++) {
+    compiler.instructions.pop() // store instruction gets popped
+    const instructionSet = []
+    let a = 0
+    let next = compiler.instructions.pop()
+    while (
+      !(next instanceof StoreInstruction || next instanceof CallInstruction)
+    ) {
+      instructionSet[a] = next // load and intermediate instructions get popped
+      a++
+      next = compiler.instructions.pop()
+    }
+    compiler.instructions.push(next)
+    reverse_instructions[j] = instructionSet
+  }
+  for (let j = 0; j < expressionTypes.types.length; j++) {
+    for (let k = reverse_instructions[j].length - 1; k >= 0; k--) {
+      compiler.instructions.push(reverse_instructions[j][k] as Instruction)
+    }
+    compiler.instructions.push(new StoreInstruction())
+  }
+  return expressionTypes.types.length - 1
 }
